@@ -33,11 +33,17 @@
   button:not(:disabled):hover{filter:brightness(1.12)}
   label{color:var(--muted);font-size:.9rem;display:flex;align-items:center;gap:6px}
   .help{margin-top:14px;color:var(--muted);font-size:.85rem;line-height:1.5}
-  #modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:10}
-  #modal.show{display:flex}
+  #modal,#dblModal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:10}
+  #modal.show,#dblModal.show{display:flex}
+  #dblModal .card button+button{margin-left:8px}
   .card{background:var(--panel);padding:28px 34px;border-radius:16px;text-align:center;max-width:90vw;border:1px solid #35574a}
   .card h2{margin:0 0 8px;font-size:1.6rem}
   .card p{margin:0 0 18px;color:var(--muted)}
+  #coachPanel{margin-top:12px;background:var(--panel);border:1px solid #35574a;border-radius:12px;padding:10px 14px;font-size:.92rem;line-height:1.55}
+  #coachPanel .hint{color:#5dff9a;font-weight:600;margin-bottom:4px}
+  #coachPanel .stats{color:var(--muted);font-size:.85rem;margin-top:4px}
+  .r-best{color:#5dff9a}.r-good{color:#a8e063}.r-inacc{color:#ffd84a}.r-blunder{color:#ff7a66}
+  label.chk{cursor:pointer}
 </style>
 </head>
 <body>
@@ -48,12 +54,15 @@
   </header>
   <div id="status"></div>
   <div id="note"></div>
-  <div class="boardwrap"><svg id="board" viewBox="0 0 900 612" role="img" aria-label="Backgammon board"></svg></div>
+  <div class="boardwrap"><svg id="board" viewBox="0 0 960 612" role="img" aria-label="Backgammon board"></svg></div>
   <div class="info"><span id="pipW"></span><span id="pipB"></span></div>
   <div class="controls">
     <button id="rollBtn" class="primary">🎲 Roll dice</button>
     <button id="undoBtn">↶ Undo move</button>
+    <button id="hintBtn">💡 Hint</button>
+    <button id="dblBtn">×2 Double</button>
     <button id="newBtn">New game</button>
+    <label class="chk"><input type="checkbox" id="coachOn" checked> Coach</label>
     <label>Mode
       <select id="mode"><option value="ai">vs Computer</option><option value="two">2 players</option></select>
     </label>
@@ -61,7 +70,13 @@
       <select id="level"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select>
     </label>
   </div>
+  <div id="coachPanel"></div>
   <div class="help">
+    <b>Move coach:</b> press <b>Hint</b> (or <b>H</b>) for a suggested move shown as an arrow; after every turn the coach
+    rates your move against the best option it can find.<br>
+    <b>Doubling cube:</b> before rolling you may double the stakes (<b>Double</b> button or <b>D</b>). Your opponent must
+    <i>take</i> (the game is now worth double and they own the cube) or <i>drop</i> (you win the current stake). Only the
+    cube owner can redouble, up to 64. Gammons and backgammons are multiplied by the cube.<br>
     White moves from the top-right to the bottom-right (24 → 1) and bears off to the bottom tray;
     Black moves the opposite way. Click a highlighted checker, then a highlighted destination.
     You must use both dice if possible (all four on doubles). Hit a lone checker to send it to the bar;
@@ -70,6 +85,7 @@
   </div>
 </div>
 <div id="modal"><div class="card"><h2 id="mTitle"></h2><p id="mText"></p><button class="primary" id="againBtn">Play again</button></div></div>
+<div id="dblModal"><div class="card"><h2 id="dTitle"></h2><p id="dText"></p><button class="primary" id="takeBtn">Take</button><button id="dropBtn">Drop</button></div></div>
 
 <script>
 "use strict";
@@ -269,7 +285,10 @@ const rnd = () => 1+Math.floor(Math.random()*6);
 
 const G = {
   s:null, turn:0, phase:'roll', diceList:[], rem:[], need:0, restrict:null, legal:[], selected:null,
-  hist:[], mode:'ai', level:'normal', score:[0,0], gid:0, busy:false, note:'', msg:''
+  hist:[], mode:'ai', level:'normal', score:[0,0], gid:0, busy:false, note:'', msg:'',
+  coachOn:true, coach:null, hint:null, hintText:'', lastRating:null,
+  cube:{value:1, owner:null}, pendingDoubler:null,
+  stats:[0,1].map(()=>({n:0,best:0,good:0,inacc:0,blunder:0,loss:0}))
 };
 const isAI = p => G.mode==='ai' && p===1;
 const turnLabel = p => G.mode==='ai' ? (p===0?'Your turn':"Computer's turn") : (p===0?"White's turn":"Black's turn");
@@ -279,7 +298,9 @@ function newGame(){
   G.gid++;
   G.s = newState(); G.score = G.score || [0,0];
   G.hist=[]; G.legal=[]; G.selected=null; G.busy=false; G.msg='';
-  $('modal').classList.remove('show');
+  G.coach=null; G.hint=null; G.hintText=''; G.lastRating=null;
+  G.cube={value:1, owner:null}; G.pendingDoubler=null;
+  $('modal').classList.remove('show'); $('dblModal').classList.remove('show');
   let a,b; do { a=rnd(); b=rnd(); } while (a===b);
   G.turn = a>b ? 0 : 1;
   const n0 = G.mode==='ai'?'You':'White', n1 = G.mode==='ai'?'Computer':'Black';
@@ -311,6 +332,8 @@ async function doRoll(preset){
   }
   G.phase='move'; G.hist=[]; G.msg='';
   G.legal = legalFirstMoves(G.s,G.turn,G.rem,G.need,G.restrict);
+  G.hint=null; G.hintText='';
+  prepareCoach();
   autoSelect(); render();
   if (isAI(G.turn)) aiPlay();
 }
@@ -323,8 +346,9 @@ function autoSelect(){
 function endTurn(){
   G.turn = 1-G.turn; G.phase='roll'; G.diceList=[]; G.rem=[]; G.need=0; G.legal=[]; G.hist=[];
   G.selected=null; G.msg=''; G.note=''; G.busy=false;
+  G.hint=null; G.hintText=''; G.coach=null;
   render();
-  if (isAI(G.turn)){ const gid=G.gid; setTimeout(()=>{ if (gid===G.gid) doRoll(); },700); }
+  if (isAI(G.turn)){ const gid=G.gid; setTimeout(()=>{ if (gid===G.gid) aiTurnStart(); },700); }
 }
 
 function doMove(m, byAI){
@@ -333,6 +357,8 @@ function doMove(m, byAI){
   G.s = applyMove(G.s,p,m);
   G.rem.splice(G.rem.indexOf(m.die),1);
   G.need--; G.restrict=null; G.selected=null;
+  G.hint=null; G.hintText='';
+  if (!byAI && (G.s.off[p]===15 || G.need<=0 || G.rem.length===0)) rateTurn(p);
   if (G.s.off[p]===15){ gameOver(p); return; }
   if (G.need<=0 || G.rem.length===0){
     G.legal=[]; G.busy=true; render();
@@ -363,6 +389,7 @@ function undo(){
   if (G.phase!=='move' || isAI(G.turn) || G.busy || !G.hist.length) return;
   const h = G.hist.pop();
   G.s=h.s; G.rem=h.rem; G.need=h.need; G.restrict=h.restrict;
+  G.hint=null; G.hintText='';
   G.legal = legalFirstMoves(G.s,G.turn,G.rem,G.need,G.restrict);
   autoSelect(); render();
 }
@@ -377,11 +404,142 @@ function gameOver(p){
     for (let i=0;i<24 && !bg;i++) if (own(s,q,i)>0 && (p===0 ? i<=5 : i>=18)) bg=true;
     if (bg){ mult=3; kind='Backgammon! '; }
   }
-  G.score[p]+=mult;
+  finishGame(p, mult*G.cube.value, kind + (G.cube.value>1 ? `${mult} × cube ${G.cube.value}. ` : ''));
+}
+function finishGame(p, pts, extra){
+  G.phase='over'; G.legal=[]; G.gid++;
+  G.score[p]+=pts;
   render();
   $('mTitle').textContent = winnerName(p);
-  $('mText').textContent = `${kind}${mult} point${mult>1?'s':''} awarded.`;
+  $('mText').textContent = `${extra}${pts} point${pts>1?'s':''} awarded.`;
   $('modal').classList.add('show');
+}
+
+/* ======================= Doubling cube ======================= */
+// Decisions use the race lead: (opponent pips - my pips) / my pips. Double from 9% ahead; take if the doubler leads by <= 13%.
+const DOUBLE_AT = 0.09, TAKE_UP_TO = 0.13, TOO_GOOD = 0.35;
+const lead = p => { const a=pips(G.s,p), b=pips(G.s,1-p); return (b-a)/Math.max(a,1); };
+const nameOf = p => G.mode==='ai' ? (p===0?'You':'Computer') : (p===0?'White':'Black');
+function canDouble(p){
+  return G.phase==='roll' && !G.busy && G.cube.value<64 && (G.cube.owner===null || G.cube.owner===p) &&
+         G.s.off[0]<15 && G.s.off[1]<15;
+}
+const adviseTake = doubler => lead(doubler) <= TAKE_UP_TO;
+
+function offerDouble(doubler){
+  if (!canDouble(doubler)) return;
+  const gid=G.gid, q=1-doubler, newVal=G.cube.value*2;
+  G.phase='double'; G.pendingDoubler=doubler; G.hint=null; G.hintText='';
+  const you = G.mode==='ai' && doubler===0;
+  G.note = `${nameOf(doubler)} ${you?'double':'doubles'} to ${newVal}.`;
+  render();
+  if (isAI(q)){
+    setTimeout(()=>{
+      if (gid!==G.gid) return;
+      resolveDouble(G.level==='easy' ? Math.random()<0.7 : adviseTake(doubler));
+    }, 900);
+  } else {
+    $('dTitle').textContent = G.note;
+    $('dText').textContent = `Take: the game is now worth ${newVal}× and ${G.mode==='ai'?'you own':nameOf(q)+' owns'} the cube. ` +
+      `Drop: ${G.mode==='ai'?'you lose':nameOf(q)+' loses'} ${G.cube.value} point${G.cube.value>1?'s':''}.` +
+      (G.coachOn ? ` Coach suggests: ${adviseTake(doubler)?'Take':'Drop'}.` : '');
+    $('dblModal').classList.add('show');
+  }
+}
+function resolveDouble(take){
+  if (G.phase!=='double') return;
+  const d=G.pendingDoubler, q=1-d, gid=G.gid;
+  $('dblModal').classList.remove('show');
+  if (!take){ finishGame(d, G.cube.value, `${nameOf(q)} dropped the double. `); return; }
+  G.cube.value*=2; G.cube.owner=q;
+  G.phase='roll';
+  G.note = `${nameOf(q)} took the double — the cube is now ${G.cube.value}.`;
+  render();
+  if (isAI(d)) setTimeout(()=>{ if (gid===G.gid) doRoll(); },700);
+}
+function aiTurnStart(){
+  const p=G.turn, l=lead(p);
+  if (G.level!=='easy' && canDouble(p) && l>=DOUBLE_AT && l<=TOO_GOOD){ offerDouble(p); return; }
+  doRoll();
+}
+
+/* ======================= Move coach ======================= */
+function ptName(p,i){
+  if (i===barFrom(p)) return 'bar';
+  if (i===offTo(p)) return 'off';
+  return p===0 ? i+1 : 24-i;       // point numbers from the mover's own point of view
+}
+const seqText = (p,seq) => seq.map(m=>`${ptName(p,m.f)}→${ptName(p,m.t)}`).join(',  ');
+
+function bestFinal(p){
+  let best=null;
+  for (const f of enumerateFinals(G.s,p,G.rem,G.need,G.restrict)){
+    const v=evaluate(f.st,p);
+    if (!best || v>best.v) best={v,seq:f.seq};
+  }
+  return best;
+}
+// Scores every complete way to play the roll at the start of a human turn, so the finished turn can be rated.
+function prepareCoach(){
+  G.coach=null;
+  const p=G.turn;
+  if (!G.coachOn || isAI(p) || G.need<1) return;
+  const map=new Map(); let best=null;
+  for (const f of enumerateFinals(G.s,p,G.rem,G.need,G.restrict)){
+    const v=evaluate(f.st,p);
+    map.set(stateKey(f.st),v);
+    if (!best || v>best.v) best={v,seq:f.seq};
+  }
+  if (best) G.coach={map,best,p};
+}
+function rateTurn(p){
+  const c=G.coach; G.coach=null;
+  if (!c || c.p!==p) return;
+  const v=c.map.get(stateKey(G.s)); if (v===undefined) return;
+  const loss=Math.max(0,c.best.v-v), st=G.stats[p];
+  let label,cls,key;
+  if (loss<0.5){ label='Best move'; cls='r-best'; key='best'; }
+  else if (loss<=3){ label='Good'; cls='r-good'; key='good'; }
+  else if (loss<=8){ label='Inaccuracy'; cls='r-inacc'; key='inacc'; }
+  else { label='Blunder'; cls='r-blunder'; key='blunder'; }
+  st.n++; st[key]++; st.loss+=loss;
+  G.lastRating={p,label,cls,loss,best:seqText(p,c.best.seq)};
+}
+function hint(){
+  if (!G.coachOn || G.phase!=='move' || isAI(G.turn) || G.busy) return;
+  const p=G.turn, b=bestFinal(p);
+  if (!b || !b.seq.length) return;
+  const m=b.seq[0];
+  G.hint={f:m.f,t:m.t};
+  G.hintText='Suggested: '+seqText(p,b.seq);
+  G.selected=m.f;
+  render();
+}
+function coachHtml(){
+  let h='';
+  if (G.hintText) h+=`<div class="hint">💡 ${G.hintText}</div>`;
+  if (G.phase==='roll' && !isAI(G.turn) && canDouble(G.turn)){
+    const l=lead(G.turn), pct=Math.round(l*100);
+    const adv = l>=DOUBLE_AT && l<=TOO_GOOD ? 'you lead the race — doubling is reasonable'
+              : l>TOO_GOOD ? 'you are far ahead — a double may be dropped; doubling now still wins the stake'
+              : 'not strong enough to double yet';
+    h+=`<div class="hint">🎲 Cube: ${adv} (race lead ${pct>0?'+':''}${pct}%).</div>`;
+  }
+  const r=G.lastRating;
+  if (r){
+    const who = G.mode==='ai' ? '' : ` (${r.p===0?'White':'Black'})`;
+    h+=`<div>Last move${who}: <b class="${r.cls}">${r.label}</b> — ` +
+       (r.loss<0.5 ? `matches the coach's pick.` : `${r.loss.toFixed(1)} worse than the coach's pick. Coach preferred: ${r.best}`) + `</div>`;
+  } else if (!G.hintText){
+    h+=`<div>Make a move and the coach will rate it. Stuck? Press <b>Hint</b>.</div>`;
+  }
+  for (const q of (G.mode==='ai' ? [0] : [0,1])){
+    const st=G.stats[q];
+    if (!st.n) continue;
+    const name = G.mode==='ai' ? 'Your turns' : (q===0?'White':'Black');
+    h+=`<div class="stats">${name}: ${st.n} · Best ${st.best} · Good ${st.good} · Inaccuracy ${st.inacc} · Blunder ${st.blunder} · avg loss ${(st.loss/st.n).toFixed(1)}</div>`;
+  }
+  return h;
 }
 
 /* ======================= Input ======================= */
@@ -426,7 +584,9 @@ function die(x,y,v,used){
 
 function render(){
   const s=G.s, p=G.turn; let h='';
-  h += `<rect width="900" height="612" rx="14" fill="#4b2e1a"/>`;
+  h += `<defs><marker id="ah" markerWidth="5" markerHeight="5" refX="2.5" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5z" fill="#5dff9a"/></marker></defs>`;
+  h += `<rect width="960" height="612" rx="14" fill="#4b2e1a"/>`;
+  h += `<rect x="892" y="22" width="60" height="568" fill="#143327"/>`;
   h += `<rect x="30" y="22" width="360" height="568" fill="#1d4a3a"/><rect x="450" y="22" width="360" height="568" fill="#1d4a3a"/>`;
   h += `<rect x="390" y="0" width="60" height="612" fill="#3a2212"/>`;
   h += `<rect x="818" y="22" width="64" height="240" fill="#143327"/><rect x="818" y="350" width="64" height="240" fill="#143327"/>`;
@@ -479,6 +639,25 @@ function render(){
       h += `<circle class="ring${f===G.selected?' sel':''}" cx="${x}" cy="${y}" r="29"/>`;
     }
   }
+  // doubling cube (centred = "64"; otherwise sits on its owner's side)
+  {
+    const cy = G.cube.owner===null ? 306 : (G.cube.owner===0 ? 562 : 50);
+    const txt = G.cube.owner===null ? 64 : G.cube.value;
+    h += `<rect x="900" y="${cy-22}" width="44" height="44" rx="8" fill="#fbf8f0" stroke="#333" stroke-width="2"/>` +
+         `<text x="922" y="${cy+9}" text-anchor="middle" font-size="${txt>=10?22:26}" font-weight="800" fill="#222">${txt}</text>`;
+  }
+  // coach hint arrow
+  if (G.hint && G.phase==='move' && !isAI(p)){
+    const {f,t}=G.hint; let a,b;
+    if (f===barFrom(p)) a=barPos(p,s.bar[p]-1,s.bar[p]);
+    else { const c=own(s,p,f); a=stackPos(f,c-1,c); }
+    if (t===offTo(p)) b=[850, p===0?470:142];
+    else { const c=own(s,p,t); b=stackPos(t,c,c+1); }
+    const dx=b[0]-a[0], dy=b[1]-a[1], len=Math.hypot(dx,dy)||1;
+    const x1=a[0]+dx/len*28, y1=a[1]+dy/len*28, x2=b[0]-dx/len*30, y2=b[1]-dy/len*30;
+    h += `<circle cx="${b[0]}" cy="${b[1]}" r="27" fill="none" stroke="#5dff9a" stroke-width="3" stroke-dasharray="6 5" pointer-events="none"/>`;
+    h += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#5dff9a" stroke-width="5" stroke-linecap="round" marker-end="url(#ah)" opacity=".9" pointer-events="none"/>`;
+  }
   // dice
   if (G.diceList.length){
     const left = G.diceList.slice(); const rem = G.rem.slice();
@@ -501,6 +680,7 @@ function render(){
   if (G.phase==='over') st = winnerName(p);
   else if (G.phase==='nomove') st = G.msg;
   else if (G.phase==='rolling') st = 'Rolling…';
+  else if (G.phase==='double') st = 'Double offered — waiting for take or drop…';
   else if (G.phase==='roll') st = isAI(p) ? "Computer's turn…" : `${turnLabel(p)} — roll the dice.`;
   else if (isAI(p)) st = 'Computer is moving…';
   else st = `${turnLabel(p)} — ${G.need} move${G.need===1?'':'s'} left. ${G.selected===null?'Pick a highlighted checker.':'Pick a destination.'}`;
@@ -513,6 +693,12 @@ function render(){
   $('rollBtn').disabled = !(G.phase==='roll' && !isAI(p) && !G.busy);
   $('undoBtn').disabled = !(G.phase==='move' && !isAI(p) && !G.busy && G.hist.length);
   $('levelLabel').style.display = G.mode==='ai' ? '' : 'none';
+  $('dblBtn').disabled = !(!isAI(p) && canDouble(p));
+  $('dblBtn').textContent = `×2 Double → ${Math.min(64,G.cube.value*2)}`;
+  $('hintBtn').style.display = G.coachOn ? '' : 'none';
+  $('hintBtn').disabled = !(G.coachOn && G.phase==='move' && !isAI(p) && !G.busy);
+  $('coachPanel').style.display = G.coachOn ? '' : 'none';
+  if (G.coachOn) $('coachPanel').innerHTML = coachHtml();
 }
 
 /* ======================= Wiring ======================= */
@@ -521,14 +707,21 @@ $('board').addEventListener('click', e=>{
 });
 $('rollBtn').onclick = () => { if (G.phase==='roll' && !isAI(G.turn)) doRoll(); };
 $('undoBtn').onclick = undo;
+$('hintBtn').onclick = hint;
+$('dblBtn').onclick = () => { if (!isAI(G.turn)) offerDouble(G.turn); };
+$('takeBtn').onclick = () => resolveDouble(true);
+$('dropBtn').onclick = () => resolveDouble(false);
+$('coachOn').onchange = e => { G.coachOn=e.target.checked; G.hint=null; G.hintText=''; if (!G.coachOn) G.coach=null; render(); };
 $('newBtn').onclick = () => newGame();
 $('againBtn').onclick = () => newGame();
-$('mode').onchange = e => { G.mode=e.target.value; G.score=[0,0]; newGame(); };
+$('mode').onchange = e => { G.mode=e.target.value; G.score=[0,0]; G.stats=[0,1].map(()=>({n:0,best:0,good:0,inacc:0,blunder:0,loss:0})); newGame(); };
 $('level').onchange = e => { G.level=e.target.value; };
 document.addEventListener('keydown', e=>{
   if (e.target.tagName==='SELECT') return;
   if (e.code==='Space' || e.key==='Enter'){ if (G.phase==='roll' && !isAI(G.turn)){ e.preventDefault(); doRoll(); } }
   else if (e.key==='u' || e.key==='U') undo();
+  else if (e.key==='h' || e.key==='H') hint();
+  else if (e.key==='d' || e.key==='D'){ if (!isAI(G.turn)) offerDouble(G.turn); }
 });
 
 newGame();
